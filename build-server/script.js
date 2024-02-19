@@ -5,9 +5,9 @@ const path = require('path');
 const fs = require('fs');
 const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 const mime = require('mime-types');
-const Redis = require('ioredis');
+const { Kafkas } = require('kafkajs')
 
-const publisher = new Redis(process.env.REDIS_URL);
+
 
 const s3Client = new S3Client({
     region: 'ap-south-1',
@@ -17,15 +17,42 @@ const s3Client = new S3Client({
     }
 });
 
-const PROJECT_ID = process.env.PROJECT_ID;
+const kafka = new Kafkas({
+    clientId: `docker-builder-${process.env.PROJECT_ID}`,
+    brokers: ['kafka-738badd-sahilchalke1011-0d2f.a.aivencloud.com:16001'],
+    ssl: {
+        ca: [fs.readFileSync(path.join(__dirname, 'kafka.pem'), 'utf-8')],
+    },
 
-function publishLog(log) {
-    publisher.publish(`logs:${PROJECT_ID}`, JSON.stringify({ log }));
+    sasl: {
+        username: 'avnadmin',
+        password: "AVNS_D6IsGrAD84Cj5T5j-_E",
+        mechanism: 'plain'
+    },
+})
+
+const producer = kafka.producer()
+
+
+const PROJECT_ID = process.env.PROJECT_ID;
+const DEPLOYMENT_ID = process.env.DEPLOYMENT_ID;
+
+async function publishLog(log) {
+    await producer.send({
+        topic: `container-logs`,
+        messages: [
+            { key: 'log', value: JSON.stringify({ PROJECT_ID, DEPLOYMENT_ID, log }) }
+        ]
+
+    })
 }
 
 async function init() {
+
+    await producer.connect()
+
     console.log('Executing script.js');
-    publishLog('Build Started...');
+    await publishLog('Build Started...');
     const outDirPath = path.join(__dirname, 'output');
 
     const p = exec(`cd ${outDirPath} && npm install && npm run build`);
@@ -42,17 +69,17 @@ async function init() {
 
     p.on('close', async function () {
         console.log('Build Complete');
-        publishLog(`Build Complete`);
+        await publishLog(`Build Complete`);
         const distFolderPath = path.join(__dirname, 'output', 'dist');
         const distFolderContents = fs.readdirSync(distFolderPath, { recursive: true });
 
-        publishLog(`Starting to upload`);
+        await publishLog(`Starting to upload`);
         for (const file of distFolderContents) {
             const filePath = path.join(distFolderPath, file);
             if (fs.lstatSync(filePath).isDirectory()) continue;
 
             console.log('uploading', filePath);
-            publishLog(`uploading ${file}`);
+            await publishLog(`uploading ${file}`);
 
             const command = new PutObjectCommand({
                 Bucket: 'sahilchalkevercel',
@@ -62,11 +89,12 @@ async function init() {
             });
 
             await s3Client.send(command);
-            publishLog(`uploaded ${file}`);
+            await publishLog(`uploaded ${file}`);
             console.log('uploaded', filePath);
         }
-        publishLog(`Done`);
+        await publishLog(`Done`);
         console.log('Done...');
+        process.exit(0);
     });
 }
 
